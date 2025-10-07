@@ -1,1 +1,27 @@
+board: 4rel4in_hv
+stack_level: 0
+
+loop_ms: 20
+debounce_obj_ms: 80
+obj_timeout_s: 20
+post_batch_timeout_s: 120
+batch_size: 10
+target_default: 100
+pulse_ms: 150
+
+# IN1..IN4 lần lượt: btn_start, ready_signal, next_signal, object_signal
+inputs:
+  btn_start: 1        # IN1
+  ready_signal: 2     # IN2 (robot báo sẵn sàng cho lần gắp kế tiếp)
+  next_signal: 3      # IN3 (robot báo đã xong Marking + Pick-out)
+  object_signal: 4    # IN4 (xung: mỗi vật rời magazine = 1)
+
+# REL1..REL3 lần lượt: Continue_signal, over_signal, start_signal
+outputs:
+  continue_signal: 1  # REL1 (Pi cho phép robot gắp 2 vật)
+  over_signal: 2      # REL2 (đủ 10 → vào Marking)
+  start_signal: 3     # REL3 (bắt đầu ca → robot về Ready)
+  # count_ok: 4       # (tuỳ chọn) gán REL4 nếu muốn báo “đủ target tổng”
+  # r_calib_req: 0    # (tuỳ chọn) nếu bạn có dùng
+  # pi_alive: 0       # (tuỳ chọn) heartbeat
 
