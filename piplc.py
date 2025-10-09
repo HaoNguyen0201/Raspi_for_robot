@@ -31,6 +31,10 @@ import shutil
 from pathlib import Path
 import yaml
 
+# ---------- tiện ích log ----------
+def log(msg: str):
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
 # ---------- Paths ----------
 BASE = Path(__file__).resolve().parent.parent  # ~/piplc
 CFG_FILE = BASE / "config.yaml"
@@ -85,7 +89,7 @@ class FourRel4In:
         state = "on" if on else "off"
         _ = self._try(self._variants_set_relay, stack=str(stack), ch=str(ch), state=state)
 
-# ---------- Helpers ----------
+# ---------- helpers ----------
 def _stack_ch(spec, default_stack):
     if isinstance(spec, int):
         return default_stack, int(spec)
@@ -148,9 +152,9 @@ class PiPLC:
         self.debounce_obj = int(self.cfg.get("debounce_obj_ms", 80))
         self.post_batch_timeout = int(self.cfg.get("post_batch_timeout_s", 120))
         self.obj_timeout = int(self.cfg.get("obj_timeout_s", 20))
-        self.batch_size = int(self.cfg.get("batch_size", 10))    # 10 cho mỗi lần mark
-        self.target_n = int(self.cfg.get("target_default", 100)) # tổng số vật cần mark
-        self.pulse_ms = int(self.cfg.get("pulse_ms", 150))       # độ rộng xung cho tín hiệu điều khiển
+        self.batch_size = int(self.cfg.get("batch_size", 10))
+        self.target_n = int(self.cfg.get("target_default", 100))
+        self.pulse_ms = int(self.cfg.get("pulse_ms", 150))
 
         # I/O map
         self.stack = int(self.cfg.get("stack_level", 0))
@@ -164,35 +168,55 @@ class PiPLC:
 
         # Runtime
         self.mode = "IDLE"   # IDLE / STARTING / PICK_IN / MARKING / AFTER_MARK / ERROR
-        self.total_done = 0  # tổng đã nhặt (đếm qua xung Object_signal)
-        self.batch_count = 0 # số đã nhặt trong batch hiện tại (<=10)
+        self.total_done = 0
+        self.batch_count = 0
         self.target_set = False
 
-        # Edge detection
+        # Edge & pulse
         self.obj_last = 0
         self.obj_last_edge_ms = 0
+        self._pulse_until = {}
+
+        # logging trackers
+        self.last_mode = self.mode
+        self.last_in = {}
+        self.last_out = {}
+
         self.hb_ms = 0
-
-        # pulse bookkeeping
-        self._pulse_until = {}  # name -> ms
-
         self.shutdown = False
+
+    # --- log state change ---
+    def _set_mode(self, new_mode: str, reason: str = ""):
+        if new_mode != self.mode:
+            log(f"STATE: {self.mode} → {new_mode}" + (f" | {reason}" if reason else ""))
+            self.last_mode = self.mode
+            self.mode = new_mode
 
     # --- low-level I/O ---
     def _in(self, name) -> int:
         spec = self.in_map[name]
         s,ch = _stack_ch(spec, self.stack)
-        return self.drv.read_in(s,ch)
+        val = self.drv.read_in(s,ch)
+        # log on change
+        old = self.last_in.get(name, None)
+        if old is None or old != val:
+            log(f"IN  {name} = {val}")
+            self.last_in[name] = val
+        return val
 
     def _out(self, name, val:bool):
         if name in self.out_map:
+            prev = self.last_out.get(name, None)
+            if prev is None or prev != bool(val):
+                log(f"OUT {name} = {'ON' if val else 'OFF'}")
+                self.last_out[name] = bool(val)
             self.rel.set(self.out_map[name], val)
 
     def _pulse(self, name, dur_ms=None):
-        """Đưa xung HIGH trong dur_ms (mặc định dùng pulse_ms) rồi auto-hạ."""
         if name not in self.out_map:
             return
         d = int(self.pulse_ms if dur_ms is None else dur_ms)
+        log(f"PULSE {name} ({d} ms)")
         self._out(name, True)
         self._pulse_until[name] = now_ms() + d
 
@@ -204,7 +228,7 @@ class PiPLC:
             del self._pulse_until[k]
 
     def safe_outputs(self):
-        for k in self.out_map.keys():
+        for k in list(self.out_map.keys()):
             self._out(k, False)
         self._pulse_until.clear()
 
@@ -220,7 +244,6 @@ class PiPLC:
         })
 
     def edge_obj(self, val:int)->bool:
-        """True khi có cạnh lên hợp lệ từ Object_signal (mỗi vật = 1 xung)."""
         t = now_ms()
         if val==1 and self.obj_last==0 and (t - self.obj_last_edge_ms) >= self.debounce_obj:
             self.obj_last_edge_ms = t
@@ -229,49 +252,39 @@ class PiPLC:
         self.obj_last = val
         return False
 
-    def wait_input(self, name, expect=1, timeout_s=10.0)->bool:
-        """Poll input trong timeout (s)."""
-        end = time.time() + timeout_s
-        while time.time() < end:
-            try:
-                if self._in(name) == expect:
-                    return True
-            except Exception:
-                pass
-            time.sleep(0.02)
-        return False
-
-    # --- command handling ---
     def handle_cmd(self, cmd):
         if not cmd:
             return
         if cmd.get("reset"):
-            self.mode = "IDLE"
+            log("CMD reset")
+            self._set_mode("IDLE", "reset")
             self.total_done = 0
             self.batch_count = 0
             self.target_set = False
             self.safe_outputs()
         if cmd.get("calib"):
+            log("CMD calib")
             if "r_calib_req" in self.out_map:
                 self._pulse("r_calib_req", self.pulse_ms)
-            self.mode = "IDLE"
+            self._set_mode("IDLE", "calib")
         if cmd.get("auto"):
             t = int(cmd.get("target",0) or 0)
+            log(f"CMD auto target={t}")
             if t > 0:
                 self.target_n = t
                 self.total_done = 0
                 self.batch_count = 0
                 self.target_set = True
-                self.mode = "STARTING"
+                self._set_mode("STARTING", "auto command")
 
     # --- main loop ---
     def loop(self):
         self.safe_outputs()
         self.save_runtime()
-        print("[PiPLC] started. Mode=IDLE")
+        log("PiPLC started. Mode=IDLE")
 
         while not self.shutdown:
-            # Heartbeat (optional)
+            # heartbeat (optional)
             if "pi_alive" in self.out_map and now_ms() - self.hb_ms > 500:
                 self.hb_ms = now_ms()
                 spec = self.out_map["pi_alive"]
@@ -280,39 +293,41 @@ class PiPLC:
                 cur = self.rel.state.get(key, False)
                 self.rel.set(spec, not cur)
 
-            # maintain pulse outputs
+            # maintain pulses
             self._service_pulses()
 
-            # get HMI command
+            # read HMI command
             cmd = read_cmd()
             self.handle_cmd(cmd)
 
-            # read inputs (try; continue on failure)
+            # read inputs (log done inside _in)
             try:
-                btn_start = self._in("btn_start")           # nút vật lý
-                obj_sig   = self._in("object_signal")       # xung mỗi vật
-                ready_sig = self._in("ready_signal")        # robot báo sẵn sàng lần gắp kế tiếp
-                next_sig  = self._in("next_signal")         # robot báo chu trình mark+pickout xong
-                err_sig   = self._in("r_error") if "r_error" in self.in_map else 0
+                btn_start = self._in("btn_start")
+                ready_sig = self._in("ready_signal")
+                next_sig  = self._in("next_signal")
+                obj_sig   = self._in("object_signal")
+                # nếu bạn có r_error trong inputs, thêm vào config.yaml rồi uncomment:
+                # err_sig   = self._in("r_error")
+                err_sig   = 0
             except Exception as e:
                 self.save_runtime(err=f"IO read error: {e}")
                 time.sleep(self.loop_ms/1000.0)
                 continue
 
-            # Robot error -> ERROR
+            # robot error -> ERROR
             if err_sig == 1:
                 self.safe_outputs()
-                self.mode = "ERROR"
+                self._set_mode("ERROR", "robot error input=1")
                 self.save_runtime(err="Robot error")
                 time.sleep(self.loop_ms/1000.0)
                 continue
 
-            # --- STATE MACHINE ---
+            # ---- STATE MACHINE ----
             if self.mode == "IDLE":
                 # chờ HMI auto(target) + BTN_START
                 self.batch_count = 0
                 if self.target_set and btn_start == 1:
-                    self.mode = "STARTING"
+                    self._set_mode("STARTING", "target set + BTN_START=1")
                 self.save_runtime()
                 time.sleep(self.loop_ms/1000.0)
                 continue
@@ -321,9 +336,8 @@ class PiPLC:
                 # Pulse Start_signal để robot move tới Ready
                 if "start_signal" in self.out_map:
                     self._pulse("start_signal")
-                # Reset batch cho vòng mới
                 self.batch_count = 0
-                self.mode = "PICK_IN"
+                self._set_mode("PICK_IN", "start_signal pulsed")
                 self.save_runtime()
                 time.sleep(self.loop_ms/1000.0)
                 continue
@@ -334,74 +348,61 @@ class PiPLC:
                     self.batch_count += 1
                     self.total_done += 1
                     save_count(self.total_done)
+                    log(f"OBJ_PULSE → batch_count={self.batch_count}, total_done={self.total_done}")
 
-                # Kiểm tra đạt target tổng?
+                # Đủ target tổng?
                 if self.total_done >= self.target_n:
-                    # Không cần lôi robot chạy thêm — nếu đang còn đồ trong máy, phần Marking sẽ kết thúc theo batch cũ.
-                    # Ở đây vì batch chưa đủ 10 nhưng target tổng đã đạt → không phát Continue nữa.
-                    # Nếu batch_count == 0: kết thúc luôn
                     if self.batch_count == 0:
                         if "count_ok" in self.out_map:
                             self._pulse("count_ok", self.pulse_ms)
-                        self.mode = "IDLE"
+                        self._set_mode("IDLE", "target total reached (no open batch)")
                     else:
-                        # Nếu đang có batch dở nhưng đủ target: kết thúc batch này bằng Over (đưa vào Marking luôn)
                         if "over_signal" in self.out_map:
                             self._pulse("over_signal")
-                        self.mode = "MARKING"
+                        self._set_mode("MARKING", "target total reached; closing current batch")
                     self.save_runtime()
                     time.sleep(self.loop_ms/1000.0)
                     continue
 
                 # Đủ 10 cho một lần marking?
                 if self.batch_count >= self.batch_size:
-                    # Gọi Marking process bằng Over_signal
                     if "over_signal" in self.out_map:
                         self._pulse("over_signal")
-                    self.mode = "MARKING"
+                    self._set_mode("MARKING", "batch_count reached batch_size")
                     self.save_runtime()
                     time.sleep(self.loop_ms/1000.0)
                     continue
 
-                # Nếu chưa đủ batch_size và chưa đủ target tổng:
-                # Chờ robot báo Ready_signal rồi phát Continue_signal cho lần gắp tiếp (2 vật)
+                # Chưa đủ 10 & chưa đủ target -> chờ ready rồi continue
                 if ready_sig == 1:
                     if "continue_signal" in self.out_map:
                         self._pulse("continue_signal")
-                    # Chờ ready_sig hạ (tránh bắn liên tục)
-                    # (Không blocking lâu; chỉ nhả CPU)
                 self.save_runtime()
                 time.sleep(self.loop_ms/1000.0)
                 continue
 
             if self.mode == "MARKING":
-                # Robot tự chạy: về home, reset drop index, Mark_signal→laser, đợi Done,
-                # Pick-out 10 vật rồi về Ready và phát Next_signal.
-                # Pi chỉ chờ Next_signal để biết đã xong chu trình.
-                self.mode = "AFTER_MARK"
+                # Robot tự mark + pick-out; Pi chuyển sang AFTER_MARK để chờ next_signal
+                self._set_mode("AFTER_MARK", "waiting Next_signal")
                 self.save_runtime()
                 time.sleep(self.loop_ms/1000.0)
                 continue
 
             if self.mode == "AFTER_MARK":
-                # Đợi robot báo Next_signal (chu trình mark + pickout đã xong)
                 if next_sig == 1:
-                    # Kết thúc chu trình; quyết định tiếp
                     if self.total_done >= self.target_n:
                         if "count_ok" in self.out_map:
                             self._pulse("count_ok", self.pulse_ms)
-                        self.mode = "IDLE"
                         self.batch_count = 0
+                        self._set_mode("IDLE", "job completed")
                     else:
-                        # Chu trình tiếp theo: quay lại PICK_IN (batch mới)
                         self.batch_count = 0
-                        self.mode = "PICK_IN"
+                        self._set_mode("PICK_IN", "continue next batch")
                     self.save_runtime()
                 time.sleep(self.loop_ms/1000.0)
                 continue
 
             if self.mode == "ERROR":
-                # chờ Reset từ HMI
                 self.save_runtime(err="ERROR state")
                 time.sleep(self.loop_ms/1000.0)
                 continue
@@ -416,3 +417,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
