@@ -21,7 +21,6 @@ outputs:
   continue_signal: 1  # REL1 (Pi cho phép robot gắp 2 vật)
   over_signal: 2      # REL2 (đủ 10 → vào Marking)
   start_signal: 3     # REL3 (bắt đầu ca → robot về Ready)
-  # count_ok: 4       # (tuỳ chọn) gán REL4 nếu muốn báo “đủ target tổng”
-  # r_calib_req: 0    # (tuỳ chọn) nếu bạn có dùng
-  # pi_alive: 0       # (tuỳ chọn) heartbeat
+  count_ok: 4         # REL4 -> đấu còi/buzzer/đèn báo
+
 
