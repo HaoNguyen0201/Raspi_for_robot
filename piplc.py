@@ -49,16 +49,10 @@ class FourRel4In:
         self.cmd = cmd_path or shutil.which("4rel4in") or "/usr/local/bin/4rel4in"
         self.use_sudo = bool(use_sudo)
         self._variants_read_in = [
-            ["in", "{stack}", "{ch}"],
-            ["din", "{stack}", "{ch}"],
-            ["readin", "{stack}", "{ch}"],
-            ["inrd", "{stack}", "{ch}"],
+            ["{stack}", "inrd", "{ch}"],
         ]
         self._variants_set_relay = [
-            ["relwr", "{stack}", "{ch}", "{state}"],
-            ["rel",   "{stack}", "{ch}", "{state}"],
-            ["r",     "{stack}", "{ch}", "{state}"],
-            ["write", "{stack}", "{ch}", "{state}"],
+            ["{stack}", "relwr", "{ch}", "{state}"],
         ]
 
     def _run(self, args_fmt, **kw) -> str:
