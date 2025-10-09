@@ -155,7 +155,8 @@ class PiPLC:
         self.batch_size = int(self.cfg.get("batch_size", 10))
         self.target_n = int(self.cfg.get("target_default", 100))
         self.pulse_ms = int(self.cfg.get("pulse_ms", 150))
-
+        self.horn_ms = int(self.cfg.get("horn_ms", self.pulse_ms))
+      
         # I/O map
         self.stack = int(self.cfg.get("stack_level", 0))
         self.in_map = self.cfg["inputs"]
@@ -355,6 +356,7 @@ class PiPLC:
                     if self.batch_count == 0:
                         if "count_ok" in self.out_map:
                             self._pulse("count_ok", self.pulse_ms)
+                            self._pulse("count_ok", self.horn_ms)
                         self._set_mode("IDLE", "target total reached (no open batch)")
                     else:
                         if "over_signal" in self.out_map:
@@ -393,6 +395,7 @@ class PiPLC:
                     if self.total_done >= self.target_n:
                         if "count_ok" in self.out_map:
                             self._pulse("count_ok", self.pulse_ms)
+                            self._pulse("count_ok", self.horn_ms)
                         self.batch_count = 0
                         self._set_mode("IDLE", "job completed")
                     else:
